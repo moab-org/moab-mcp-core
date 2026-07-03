@@ -7,6 +7,7 @@ from jwt import PyJWKClient
 from jwt.exceptions import InvalidTokenError
 
 from .config import AuthConfig
+from .portal_roles import PortalRolesProvider
 
 
 class AuthError(Exception):
@@ -48,9 +49,21 @@ def has_allowed_role(roles: frozenset[str], allowed: frozenset[str]) -> bool:
 
 
 class KeycloakVerifier:
-    def __init__(self, cfg: AuthConfig, jwk_client=None):
+    def __init__(self, cfg: AuthConfig, jwk_client=None, roles_provider=None):
         self._cfg = cfg
         self._jwks = jwk_client if jwk_client is not None else PyJWKClient(cfg.jwks_uri)
+        if roles_provider is None and (
+            cfg.portal_base_url and cfg.portal_tool_section and cfg.portal_tool_slug
+        ):
+            roles_provider = PortalRolesProvider(
+                base_url=cfg.portal_base_url,
+                section=cfg.portal_tool_section,
+                slug=cfg.portal_tool_slug,
+                fallback_roles=cfg.allowed_roles,
+                ttl_seconds=cfg.portal_roles_ttl,
+            )
+            roles_provider.prime()
+        self._roles = roles_provider  # None => static ALLOWED_ROLES mode (0.2.0)
 
     def verify(self, token: str) -> TokenClaims:
         try:
@@ -82,6 +95,8 @@ class KeycloakVerifier:
             raise Unauthorized("Missing bearer token")
         token = authorization_header[len("Bearer "):].strip()
         claims = self.verify(token)
-        if not has_allowed_role(claims.roles, self._cfg.allowed_roles):
+        allowed = self._roles.get_allowed_roles() if self._roles is not None else self._cfg.allowed_roles
+        # Unconditional admin bypass mirrors the portal's ProjectAccessPolicy.HasAccess.
+        if "admin" not in claims.roles and not has_allowed_role(claims.roles, allowed):
             raise Forbidden()
         return claims

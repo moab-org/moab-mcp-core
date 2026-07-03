@@ -112,3 +112,48 @@ def test_verify_audience_required_but_missing_raises_unauthorized(jwk_client, ma
     v = KeycloakVerifier(_cfg(audience="seo-factors"), jwk_client=jwk_client)
     with pytest.raises(Unauthorized):
         v.verify(make_token(aud=None))
+
+
+# --- Dynamic roles (portal) ---
+
+class _StubRolesProvider:
+    def __init__(self, roles: frozenset[str]):
+        self.roles = roles
+
+    def get_allowed_roles(self) -> frozenset[str]:
+        return self.roles
+
+
+def test_authenticate_admin_bypass_even_if_not_in_allowed(jwk_client, make_token):
+    # "admin" is NOT in the allowed set, but the bypass is unconditional
+    # (mirrors the portal's ProjectAccessPolicy.HasAccess).
+    v = KeycloakVerifier(_cfg(allowed=("crew",)), jwk_client=jwk_client)
+    claims = v.authenticate("Bearer " + make_token(roles=("admin",)))
+    assert "admin" in claims.roles
+
+
+def test_authenticate_admin_bypass_with_empty_provider_roles(jwk_client, make_token):
+    # Empty allowedRoles from the portal means "admin only".
+    v = KeycloakVerifier(_cfg(allowed=("org",)), jwk_client=jwk_client,
+                         roles_provider=_StubRolesProvider(frozenset()))
+    claims = v.authenticate("Bearer " + make_token(roles=("admin",)))
+    assert "admin" in claims.roles
+    with pytest.raises(Forbidden):
+        v.authenticate("Bearer " + make_token(roles=("org",)))
+
+
+def test_authenticate_provider_roles_replace_env_roles(jwk_client, make_token):
+    # Provider says {"crew"}; env said {"org"}. Provider wins (replacement,
+    # not union): org -> Forbidden, crew -> ok.
+    v = KeycloakVerifier(_cfg(allowed=("org",)), jwk_client=jwk_client,
+                         roles_provider=_StubRolesProvider(frozenset({"crew"})))
+    with pytest.raises(Forbidden):
+        v.authenticate("Bearer " + make_token(roles=("org",)))
+    claims = v.authenticate("Bearer " + make_token(roles=("crew",)))
+    assert "crew" in claims.roles
+
+
+def test_verifier_without_portal_config_has_no_provider(jwk_client):
+    # Regression: config without portal_* env keeps the static 0.2.0 mode.
+    v = KeycloakVerifier(_cfg(), jwk_client=jwk_client)
+    assert v._roles is None
